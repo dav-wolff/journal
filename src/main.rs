@@ -1,11 +1,13 @@
-use std::{io, path::{PathBuf, Path}, fs::{self, DirEntry}};
+use std::{io, path::{PathBuf, Path}, fs, collections::btree_map::Entry};
 use crossterm::event::{self, Event, KeyEventKind, KeyCode};
-use ratatui::{prelude::*, widgets::{Paragraph, List, ListItem}};
+use entry_list::EntryList;
+use ratatui::{prelude::*, widgets::{List, ListItem, Block, Borders, ListState}};
 
 use crate::{alternate_screen::AlternateScreen, raw_mode::RawMode};
 
 mod alternate_screen;
 mod raw_mode;
+mod entry_list;
 
 fn main() -> io::Result<()> {
 	let Some(directory) = get_directory() else {
@@ -55,13 +57,14 @@ fn run_tui(directory: &Path) -> io::Result<()> {
 		)
 		.collect::<io::Result<_>>()?;
 	
-	let list = List::new(list_items);
+	let mut entry_list = EntryList::new(list_items);
 	
 	loop {
 		terminal.draw(|frame| {
-			frame.render_widget(
-				list.clone(),
-				frame.size()
+			frame.render_stateful_widget(
+				entry_list.list(),
+				frame.size(),
+				entry_list.state()
 			)
 		})?;
 		
@@ -70,8 +73,21 @@ fn run_tui(directory: &Path) -> io::Result<()> {
 		}
 		
 		if let Event::Key(key) = event::read()? {
-			if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
-				break;
+			if key.kind != KeyEventKind::Press {
+				continue;
+			}
+			
+			match key.code {
+				KeyCode::Char('q') => {
+					break;
+				},
+				KeyCode::Up => {
+					entry_list.select_prev();
+				},
+				KeyCode::Down => {
+					entry_list.select_next();
+				},
+				_ => (),
 			}
 		}
 	}
