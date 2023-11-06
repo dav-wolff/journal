@@ -1,7 +1,7 @@
-use std::{io, path::{PathBuf, Path}, fs, collections::btree_map::Entry};
+use std::{io::{self, Write}, path::{PathBuf, Path}, fs::{self, File}, ffi::{OsString, OsStr}, process::Command, os::unix::prelude::FileExt};
 use crossterm::event::{self, Event, KeyEventKind, KeyCode};
-use entry_list::EntryList;
-use ratatui::{prelude::*, widgets::{List, ListItem, Block, Borders, ListState}};
+use entry_list::{EntryList, Entry};
+use ratatui::prelude::*;
 
 use crate::{alternate_screen::AlternateScreen, raw_mode::RawMode};
 
@@ -14,7 +14,11 @@ fn main() -> io::Result<()> {
 		return Ok(());
 	};
 	
-	run_tui(&directory)
+	let Some(editor) = get_editor() else {
+		return Ok(());
+	};
+	
+	run_tui(&directory, &editor)
 }
 
 fn get_directory() -> Option<PathBuf> {
@@ -42,22 +46,33 @@ fn get_directory() -> Option<PathBuf> {
 	}
 }
 
-fn run_tui(directory: &Path) -> io::Result<()> {
+fn get_editor() -> Option<OsString> {
+	match std::env::var_os("EDITOR") {
+		Some(editor) => Some(editor),
+		None => {
+			eprintln!("No default editor set");
+			None
+		}
+	}
+}
+
+fn run_tui(directory: &Path, editor: &OsStr) -> io::Result<()> {
 	let _alternate_screen_guard = AlternateScreen::enter();
 	let _raw_mode_guard = RawMode::enable();
 	
 	let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 	terminal.clear()?;
 	
-	let list_items: Vec<ListItem<'static>> = fs::read_dir(directory)?
+	let entries: Vec<Entry> = fs::read_dir(directory)?
 		.map(|result| result.map(
-			|file|
-				ListItem::new(file.file_name().to_string_lossy().into_owned())
-			)
-		)
+			|file| Entry {
+				path: file.path(),
+				name: file.file_name().to_string_lossy().into_owned(),
+			}
+		))
 		.collect::<io::Result<_>>()?;
 	
-	let mut entry_list = EntryList::new(list_items);
+	let mut entry_list = EntryList::new(entries);
 	
 	loop {
 		terminal.draw(|frame| {
@@ -87,10 +102,32 @@ fn run_tui(directory: &Path) -> io::Result<()> {
 				KeyCode::Down => {
 					entry_list.select_next();
 				},
+				KeyCode::Enter => {
+					edit_entry(&directory, &editor, entry_list.selected_entry());
+				},
 				_ => (),
 			}
 		}
 	}
+	
+	Ok(())
+}
+
+fn edit_entry(directory: &Path, editor: &OsStr, entry: &Entry) -> io::Result<()> {
+	let text = fs::read_to_string(&entry.path)?;
+	
+	edit_text(directory, editor, text)
+}
+
+fn edit_text(directory: &Path, editor: &OsStr, text: String) -> io::Result<()> {
+	let file_path = directory.join("PLAIN_TEXT");
+	let mut file = File::create(&file_path)?;
+	file.write_all(text.as_bytes())?;
+	
+	Command::new(editor)
+		.arg(&file_path)
+		.status()
+		.unwrap();
 	
 	Ok(())
 }
