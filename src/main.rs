@@ -1,12 +1,12 @@
-use std::{io::{self, Write}, path::{PathBuf, Path}, fs::{self, File}, ffi::{OsString, OsStr}, process::Command, os::unix::prelude::FileExt};
-use crossterm::event::{self, Event, KeyEventKind, KeyCode};
+use std::{io::{self, Write}, path::{PathBuf, Path}, fs::{self, File}, ffi::{OsString, OsStr}, process::Command};
+use alternate_screen::{enter_alternate_screen, leave_alternate_screen};
+use crossterm::{event::{self, Event, KeyEventKind, KeyCode}, terminal};
 use entry_list::{EntryList, Entry};
 use ratatui::prelude::*;
 
-use crate::{alternate_screen::AlternateScreen, raw_mode::RawMode};
+use crate::alternate_screen::AlternateScreen;
 
 mod alternate_screen;
-mod raw_mode;
 mod entry_list;
 
 fn main() -> io::Result<()> {
@@ -57,8 +57,7 @@ fn get_editor() -> Option<OsString> {
 }
 
 fn run_tui(directory: &Path, editor: &OsStr) -> io::Result<()> {
-	let _alternate_screen_guard = AlternateScreen::enter();
-	let _raw_mode_guard = RawMode::enable();
+	let _alternate_screen_guard = AlternateScreen::enter()?;
 	
 	let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 	terminal.clear()?;
@@ -103,7 +102,7 @@ fn run_tui(directory: &Path, editor: &OsStr) -> io::Result<()> {
 					entry_list.select_next();
 				},
 				KeyCode::Enter => {
-					edit_entry(&directory, &editor, entry_list.selected_entry());
+					edit_entry(&directory, &editor, &mut terminal, entry_list.selected_entry())?;
 				},
 				_ => (),
 			}
@@ -113,21 +112,27 @@ fn run_tui(directory: &Path, editor: &OsStr) -> io::Result<()> {
 	Ok(())
 }
 
-fn edit_entry(directory: &Path, editor: &OsStr, entry: &Entry) -> io::Result<()> {
+fn edit_entry(directory: &Path, editor: &OsStr, terminal: &mut Terminal<impl Backend>, entry: &Entry) -> io::Result<()> {
 	let text = fs::read_to_string(&entry.path)?;
 	
-	edit_text(directory, editor, text)
+	edit_text(directory, editor, terminal, text)
 }
 
-fn edit_text(directory: &Path, editor: &OsStr, text: String) -> io::Result<()> {
+fn edit_text(directory: &Path, editor: &OsStr, terminal: &mut Terminal<impl Backend>, text: String) -> io::Result<()> {
 	let file_path = directory.join("PLAIN_TEXT");
 	let mut file = File::create(&file_path)?;
 	file.write_all(text.as_bytes())?;
 	
-	Command::new(editor)
+	// causes quick flicker but is necessary to keep main scrollback uncontaminated
+	leave_alternate_screen()?;
+	
+	// TODO handle Err and Ok(status != 0)
+	let _ = Command::new(editor)
 		.arg(&file_path)
-		.status()
-		.unwrap();
+		.status();
+	
+	enter_alternate_screen()?;
+	terminal.clear()?;
 	
 	Ok(())
 }

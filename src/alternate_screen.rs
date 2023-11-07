@@ -1,11 +1,11 @@
 use std::io;
-use crossterm::{terminal::{EnterAlternateScreen, LeaveAlternateScreen}, ExecutableCommand};
+use crossterm::{terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode}, ExecutableCommand};
 
 pub struct AlternateScreen(());
 
 impl AlternateScreen {
 	pub fn enter() -> io::Result<AlternateScreen> {
-		io::stdout().execute(EnterAlternateScreen)?;
+		enter_alternate_screen()?;
 		
 		Ok(AlternateScreen(()))
 	}
@@ -13,10 +13,24 @@ impl AlternateScreen {
 
 impl Drop for AlternateScreen {
 	fn drop(&mut self) {
-		let result = io::stdout().execute(LeaveAlternateScreen).map(|_| ());
+		let result = leave_alternate_screen();
 		
 		if let Err(err) = result {
 			eprintln!("Failed to leave alternate screen: {err}");
 		}
 	}
+}
+
+pub fn enter_alternate_screen() -> io::Result<()> {
+	io::stdout().execute(EnterAlternateScreen)?;
+	enable_raw_mode()?;
+	
+	Ok(())
+}
+
+pub fn leave_alternate_screen() -> io::Result<()> {
+	io::stdout().execute(LeaveAlternateScreen)?;
+	disable_raw_mode()?;
+	
+	Ok(())
 }
