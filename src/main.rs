@@ -1,8 +1,11 @@
 use std::{io::{self, Write}, path::{PathBuf, Path}, fs::{self, File}, ffi::{OsString, OsStr}, process::Command};
 use alternate_screen::{enter_alternate_screen, leave_alternate_screen};
-use crossterm::{event::{self, Event, KeyEventKind, KeyCode}, terminal};
+use argon2::Config;
+use crossterm::event::{self, Event, KeyEventKind, KeyCode};
 use entry_list::{EntryList, Entry};
 use ratatui::prelude::*;
+use rpassword::prompt_password;
+use zeroize::Zeroizing;
 
 use crate::alternate_screen::AlternateScreen;
 
@@ -18,7 +21,37 @@ fn main() -> io::Result<()> {
 		return Ok(());
 	};
 	
+	let password = get_password()?;
+	let key = generate_key(password, b"salty_salt"); // TODO use proper salt
+	
+	println!("Your key is: {:x?}", *key);
+	
 	run_tui(&directory, &editor)
+}
+
+fn get_password() -> io::Result<Zeroizing<String>> {
+	let password = prompt_password("Please enter your password: ")?;
+	let password = Zeroizing::new(password);
+	
+	Ok(password)
+}
+
+fn generate_key(password: Zeroizing<String>, salt: &[u8]) -> Zeroizing<Vec<u8>> {
+	let config = Config {
+		ad: b"journal_key",
+		hash_length: 32,
+		lanes: 4,
+		mem_cost: 256 * 1024,
+		secret: &[],
+		time_cost: 1,
+		variant: argon2::Variant::Argon2id,
+		version: argon2::Version::Version13,
+	};
+	
+	let key = argon2::hash_raw(password.as_bytes(), salt, &config).unwrap();
+	let key = Zeroizing::new(key);
+	
+	key
 }
 
 fn get_directory() -> Option<PathBuf> {
