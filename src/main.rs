@@ -1,4 +1,5 @@
-use std::{io::{self, Write}, path::{PathBuf, Path}, fs::{self, File}, ffi::{OsString, OsStr}, process::Command};
+use std::{io::{self, Write, Read}, path::{PathBuf, Path}, fs::{self, File}, ffi::OsString, process::Command};
+use aes::{Aes256, cipher::{KeyInit, generic_array::GenericArray, BlockDecrypt, BlockEncrypt}};
 use alternate_screen::{enter_alternate_screen, leave_alternate_screen};
 use argon2::Config;
 use crossterm::event::{self, Event, KeyEventKind, KeyCode};
@@ -12,6 +13,15 @@ use crate::alternate_screen::AlternateScreen;
 mod alternate_screen;
 mod entry_list;
 
+const EDITING_FILE_NAME: &'static str = "PLAIN_TEXT";
+
+struct Context {
+	directory: PathBuf,
+	editing_file_path: PathBuf,
+	editor: OsString,
+	aes: Aes256,
+}
+
 fn main() -> io::Result<()> {
 	let Some(directory) = get_directory() else {
 		return Ok(());
@@ -22,11 +32,16 @@ fn main() -> io::Result<()> {
 	};
 	
 	let password = get_password()?;
-	let key = generate_key(password, b"salty_salt"); // TODO use proper salt
+	let aes = generate_key(password, b"salty_salt"); // TODO use proper salt
 	
-	println!("Your key is: {:x?}", *key);
+	let editing_file_path = directory.join(EDITING_FILE_NAME);
 	
-	run_tui(&directory, &editor)
+	run_tui(Context {
+		directory,
+		editing_file_path,
+		editor,
+		aes,
+	})
 }
 
 fn get_password() -> io::Result<Zeroizing<String>> {
@@ -36,7 +51,7 @@ fn get_password() -> io::Result<Zeroizing<String>> {
 	Ok(password)
 }
 
-fn generate_key(password: Zeroizing<String>, salt: &[u8]) -> Zeroizing<Vec<u8>> {
+fn generate_key(password: Zeroizing<String>, salt: &[u8]) -> Aes256 {
 	let config = Config {
 		ad: b"journal_key",
 		hash_length: 32,
@@ -51,7 +66,8 @@ fn generate_key(password: Zeroizing<String>, salt: &[u8]) -> Zeroizing<Vec<u8>> 
 	let key = argon2::hash_raw(password.as_bytes(), salt, &config).unwrap();
 	let key = Zeroizing::new(key);
 	
-	key
+	Aes256::new_from_slice(&key)
+		.expect("Key should have the correct size of 32 bytes")
 }
 
 fn get_directory() -> Option<PathBuf> {
@@ -89,13 +105,13 @@ fn get_editor() -> Option<OsString> {
 	}
 }
 
-fn run_tui(directory: &Path, editor: &OsStr) -> io::Result<()> {
+fn run_tui(context: Context) -> io::Result<()> {
 	let _alternate_screen_guard = AlternateScreen::enter()?;
 	
 	let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 	terminal.clear()?;
 	
-	let entries: Vec<Entry> = fs::read_dir(directory)?
+	let entries: Vec<Entry> = fs::read_dir(&context.directory)?
 		.map(|result| result.map(
 			|file| Entry {
 				path: file.path(),
@@ -135,7 +151,7 @@ fn run_tui(directory: &Path, editor: &OsStr) -> io::Result<()> {
 					entry_list.select_next();
 				},
 				KeyCode::Enter => {
-					edit_entry(&directory, &editor, &mut terminal, entry_list.selected_entry())?;
+					edit_entry(&context, &mut terminal, entry_list.selected_entry())?;
 				},
 				_ => (),
 			}
@@ -145,23 +161,83 @@ fn run_tui(directory: &Path, editor: &OsStr) -> io::Result<()> {
 	Ok(())
 }
 
-fn edit_entry(directory: &Path, editor: &OsStr, terminal: &mut Terminal<impl Backend>, entry: &Entry) -> io::Result<()> {
-	let text = fs::read_to_string(&entry.path)?;
+fn edit_entry(context: &Context, terminal: &mut Terminal<impl Backend>, entry: &Entry) -> io::Result<()> {
+	decrypt_file(context, &entry.path)?;
+	edit_text(context, terminal)?;
+	encrypt_file(context, &entry.path)?;
 	
-	edit_text(directory, editor, terminal, text)
+	Ok(())
 }
 
-fn edit_text(directory: &Path, editor: &OsStr, terminal: &mut Terminal<impl Backend>, text: String) -> io::Result<()> {
-	let file_path = directory.join("PLAIN_TEXT");
-	let mut file = File::create(&file_path)?;
-	file.write_all(text.as_bytes())?;
+fn decrypt_file(context: &Context, file_path: &Path) -> io::Result<()> {
+	let aes = &context.aes;
 	
+	let mut encrypted_file = File::open(file_path)?;
+	let mut decrypted_file = File::create(&context.editing_file_path)?;
+	let mut block = GenericArray::from([0; 16]);
+	
+	let file_len: usize = encrypted_file.metadata()?
+		.len()
+		.try_into()
+		.expect("File must be smaller than usize::MAX");
+	
+	for _ in 0..(file_len / block.len()) - 1 {
+		encrypted_file.read_exact(&mut block)?;
+		aes.decrypt_block(&mut block);
+		decrypted_file.write_all(&block)?;
+	}
+	
+	encrypted_file.read_exact(&mut block)?;
+	aes.decrypt_block(&mut block);
+	
+	let trailing_zeroes = block.iter()
+		.rev()
+		.take_while(|&&byte| byte == 0)
+		.count();
+	
+	decrypted_file.write_all(&block[0..block.len() - trailing_zeroes])?;
+	
+	Ok(())
+}
+
+fn encrypt_file(context: &Context, file_path: &Path) -> io::Result<()> {
+	let aes = &context.aes;
+	
+	let mut decrypted_file = File::open(&context.editing_file_path)?;
+	let mut encrypted_file = File::create(file_path)?;
+	let mut block = GenericArray::from([0; 16]);
+	
+	let file_len: usize = decrypted_file.metadata()?
+		.len()
+		.try_into()
+		.expect("File must be smaller than usize::MAX");
+	
+	for _ in 0..file_len / block.len() {
+		decrypted_file.read_exact(&mut block)?;
+		aes.encrypt_block(&mut block);
+		encrypted_file.write_all(&block)?;
+	}
+	
+	let remaining_file_len = file_len % block.len();
+	
+	if remaining_file_len > 0 {
+		block.fill(0);
+		
+		decrypted_file.read_exact(&mut block[0..remaining_file_len])?;
+		aes.encrypt_block(&mut block);
+		encrypted_file.write_all(&block)?;
+	}
+	
+	Ok(())
+}
+
+fn edit_text(context: &Context, terminal: &mut Terminal<impl Backend>) -> io::Result<()> {
 	// causes quick flicker but is necessary to keep main scrollback uncontaminated
 	leave_alternate_screen()?;
 	
 	// TODO handle Err and Ok(status != 0)
-	let _ = Command::new(editor)
-		.arg(&file_path)
+	let _ = Command::new(&context.editor)
+		.arg(&context.editing_file_path)
 		.status();
 	
 	enter_alternate_screen()?;
