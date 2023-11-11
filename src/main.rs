@@ -1,9 +1,11 @@
-use std::{io::{self, Write, Read}, path::{PathBuf, Path}, fs::{self, File}, ffi::OsString, process::Command};
+use core::slice;
+use std::{io::{self, Write, Read, ErrorKind}, path::{PathBuf, Path}, fs::{self, File}, ffi::OsString, process::Command};
 use aes::{Aes256, cipher::{KeyInit, generic_array::GenericArray, BlockDecrypt, BlockEncrypt}};
 use alternate_screen::{enter_alternate_screen, leave_alternate_screen};
 use argon2::Config;
 use crossterm::event::{self, Event, KeyEventKind, KeyCode};
 use entry_list::{EntryList, Entry};
+use getrandom::getrandom;
 use ratatui::prelude::*;
 use rpassword::prompt_password;
 use zeroize::Zeroizing;
@@ -31,8 +33,9 @@ fn main() -> io::Result<()> {
 		return Ok(());
 	};
 	
+	let salt = get_salt(&directory)?;
 	let password = get_password()?;
-	let aes = generate_key(password, b"salty_salt"); // TODO use proper salt
+	let aes = generate_key(password, &salt);
 	
 	let editing_file_path = directory.join(EDITING_FILE_NAME);
 	
@@ -42,6 +45,55 @@ fn main() -> io::Result<()> {
 		editor,
 		aes,
 	})
+}
+
+fn get_salt(directory: &Path) -> io::Result<[u8; 32]> {
+	let file_path = directory.join(".journal");
+	
+	let mut file = match File::open(&file_path) {
+		Ok(file) => file,
+		Err(err) if err.kind() == ErrorKind::NotFound => {
+			return generate_salt(&file_path);
+		},
+		Err(err) => return Err(err),
+	};
+	
+	let mut version = 0u8;
+	
+	match file.read_exact(slice::from_mut(&mut version)) {
+		Ok(()) => (),
+		Err(err) if err.kind() == ErrorKind::UnexpectedEof => return generate_salt(&file_path),
+		Err(err) => return Err(err),
+	}
+	
+	if version != 0u8 {
+		eprintln!("Error: unknown version of .journal file, generating new salt");
+		return generate_salt(&file_path);
+	}
+	
+	let mut salt = [0u8; 32];
+	
+	match file.read_exact(&mut salt) {
+		Ok(()) => Ok(salt),
+		Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
+			eprintln!("Error: incorrect format of .journal file, generating new salt");
+			generate_salt(&file_path)
+		},
+		Err(err) => Err(err),
+	}
+}
+
+fn generate_salt(file_path: &Path) -> io::Result<[u8; 32]> {
+	let mut file = File::create(file_path)?;
+	
+	file.write_all(&[0u8])?; // version
+	
+	let mut salt = [0u8; 32];
+	getrandom(&mut salt).expect("getrandom failed");
+	
+	file.write_all(&salt)?;
+	
+	Ok(salt)
 }
 
 fn get_password() -> io::Result<Zeroizing<String>> {
